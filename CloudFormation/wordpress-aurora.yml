@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  DBInstanceClass:
+    Type: String
+    Description: 'Instance class for Aurora MySQL DB instance. Default: db.t3.small'
+    Default: db.t3.small
+
+  EnablePerformanceInsight:
+    Type: String
+    Description: 'Enable performance insight on Aurora DB instance. Default: false'
+    Default: false
+    AllowedValues: [true, false]
+
+  AuroraCustomDomainName:
+    Type: String
+    Description: '(Optional) Custom domain for Aurora DB cluster primary endpoint.'
+    Default: ''
+
+  HostedZoneId:
+    Type: String
+    Description: '(Optional) Hosted zone id for Aurora custom domain. Required if AuroraCustomDomainName is not empty.'
+    Default: ''
+
+Conditions:
+  UsePerformanceInsight: !Equals [!Ref EnablePerformanceInsight, true]
+
+  HasCustomDomainName: !Not [!Equals [!Ref AuroraCustomDomainName, '']]
+  
+Resources:
+  AuroraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: For WordPress Aurora MySQL
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: All
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - Description: MySQL connection from Wordpress ECS task
+          FromPort: 3306
+          IpProtocol: tcp
+          SourceSecurityGroupId: !ImportValue EcsTaskSecurityGroupId
+          ToPort: 3306
+        - Description: MySQL connection from Wordpress ECS EC2
+          FromPort: 3306
+          IpProtocol: tcp
+          SourceSecurityGroupId: !ImportValue Ec2SecurityGroupId
+          ToPort: 3306  
+      VpcId: !ImportValue VpcId
+
+  AuroraDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: For WordPress Aurora
+      SubnetIds:
+        - !ImportValue DataSubnetAId
+        - !ImportValue DataSubnetBId
+
+  AuroraDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DatabaseName: wordpress
+      DBSubnetGroupName: !Ref AuroraDBSubnetGroup
+      DeletionProtection: false
+      Engine: aurora-mysql
+      EngineMode: provisioned
+      # To find engine version: aws rds describe-db-engine-versions --engine aurora-mysql --query "DBEngineVersions[].EngineVersion"
+      EngineVersion: 5.7.mysql_aurora.2.11.6
+      MasterUsername: '{{resolve:secretsmanager:wordpress-aurora:SecretString:username}}'
+      MasterUserPassword: '{{resolve:secretsmanager:wordpress-aurora:SecretString:password}}'
+      StorageEncrypted: true
+      VpcSecurityGroupIds:
+        - !Ref AuroraSecurityGroup
+
+  AuroraDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      EnablePerformanceInsights: !If [UsePerformanceInsight, true, false]
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+
+  AuroraRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasCustomDomainName
+    Properties:
+      ResourceRecords:
+        - !GetAtt AuroraDBCluster.Endpoint.Address
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref AuroraCustomDomainName
+      TTL: 300
+      Type: CNAME
+
+Outputs:
+  AuroraDBClusterEndpointOutput:
+    Value: !If [HasCustomDomainName, !Ref AuroraCustomDomainName, !GetAtt AuroraDBCluster.Endpoint.Address]
+    Export:
+      Name: AuroraDBClusterEndpoint

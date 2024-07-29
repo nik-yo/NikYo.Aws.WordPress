@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  # EC2
+  Ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: For Wordpress EC2 instances that host ECS tasks
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: All
+          IpProtocol: -1
+      VpcId: !ImportValue VpcId
+
+  # ECS
+  EcsTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: For Wordpress ECS task
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: All
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - Description: WordPress connection from ALB
+          FromPort: 8443
+          IpProtocol: tcp
+          SourceSecurityGroupId: !ImportValue AlbSecurityGroupId
+          ToPort: 8443
+      VpcId: !ImportValue VpcId
+
+Outputs:
+  Ec2SecurityGroupIdOutput:
+    Value: !Ref Ec2SecurityGroup
+    Export:
+      Name: Ec2SecurityGroupId
+
+  EcsTaskSecurityGroupIdOutput:
+    Value: !Ref EcsTaskSecurityGroup
+    Export:
+      Name: EcsTaskSecurityGroupId

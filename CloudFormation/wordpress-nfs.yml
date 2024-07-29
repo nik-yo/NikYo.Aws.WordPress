@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  InstanceType:
+    Type: String
+    Description: 'For NFS server. Default: t3a.micro'
+    Default: t3a.micro
+
+  LatestAmazonLinux2023AmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  NfsCustomDomainName:
+    Type: String
+    Description: '(Optional) Provide custom domain name for NFS server'
+    Default: ''
+
+  HostedZoneId:
+    Type: String
+    Description: '(Optional) Hosted zone id for NFS custom domain. Required if NfsCustomDomainName is not empty.'
+    Default: ''
+
+Conditions:
+  HasCustomDomainName: !Not [!Equals [!Ref NfsCustomDomainName, '']]
+
+Resources:
+  NfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: For Wordpress NFS server
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: All
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - Description: NFS connection from Wordpress ECS EC2
+          FromPort: 2049
+          IpProtocol: tcp
+          SourceSecurityGroupId: !ImportValue Ec2SecurityGroupId
+          ToPort: 2049
+      VpcId: !ImportValue VpcId
+
+  NfsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: Role for NFS EC2
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      RoleName: wordpress-nfs
+
+  NfsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: wordpress-nfs
+      Roles:
+        - !Ref NfsRole
+
+  NfsKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: wordpress-nfs
+
+  NfsEc2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref NfsInstanceProfile
+      ImageId: !Ref LatestAmazonLinux2023AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref NfsKeyPair
+      SecurityGroupIds:
+        - !Ref NfsSecurityGroup
+      SubnetId: !ImportValue PrivateSubnetAId
+      UserData:
+        !Base64 |
+          #!/bin/bash
+          sudo yum update -y
+          sudo mkdir -p /bitnami/wordpress
+          echo '/bitnami/wordpress *(rw,sync,no_root_squash)' | sudo tee -a /etc/exports
+          sudo mkfs -t xfs /dev/nvme1n1
+          uuid=$(sudo blkid -s UUID -o value /dev/nvme1n1)
+          echo "UUID=${uuid} /bitnami/wordpress  xfs defaults,nofail 0 2" | sudo tee -a /etc/fstab
+          sudo mount -U ${uuid} /bitnami/wordpress
+          sudo yum install nfs-utils
+          sudo systemctl enable nfs-server
+          sudo systemctl start nfs-server
+      Volumes:
+        - Device: /dev/sdf
+          VolumeId: !Ref NfsEbsVolume
+
+  NfsEbsVolume:
+    Type: AWS::EC2::Volume
+    Properties: 
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Iops: 3000
+      Size: 10
+      Throughput: 125
+      VolumeType: gp3
+
+  NfsRecordSet:
+    Type: AWS::Route53::RecordSet
+    Condition: HasCustomDomainName
+    Properties:
+      ResourceRecords:
+        - !GetAtt NfsEc2Instance.PrivateIp
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref NfsCustomDomainName
+      TTL: 300
+      Type: A
+
+Outputs:
+  NfsEndpointOutput:
+    Value: !If [HasCustomDomainName, !Ref NfsCustomDomainName, !GetAtt NfsEc2Instance.PrivateIp] 
+    Export:
+      Name: NfsEndpoint
